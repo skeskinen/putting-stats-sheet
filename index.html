@@ -10,12 +10,22 @@
     input, button { font-size: 16px; padding: 8px; }
     pre { background: #f6f6f6; padding: 12px; border-radius: 8px; overflow: auto; }
     .muted { color: #666; }
+    /* Putt emphasis + LR colors */
+    #currentPutt { font-size: 1.25em; font-weight: 700; }
+    #nextPutts { font-size: 1.12em; font-weight: 600; }
+    .lr-left { color: #1f6feb; }
+    .lr-right { color: #d1242f; }
+    /* Toasts */
+    #toasts { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); z-index: 9999; display: flex; flex-direction: column; gap: 8px; align-items: center; pointer-events: none; }
+    .toast { min-width: 200px; max-width: 80vw; color: white; padding: 10px 14px; border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,0.15); opacity: 0; transform: translateY(10px); transition: opacity 180ms ease, transform 180ms ease; pointer-events: auto; font-weight: 600; }
+    .toast.show { opacity: 1; transform: translateY(0); }
+    .toast-success { background: #1a7f37; }
+    .toast-fail { background: #b3261e; }
   </style>
   <script src="https://accounts.google.com/gsi/client" async defer></script>
 </head>
 <body>
   <h1>Disc Golf Putting Stats</h1>
-  <p class="muted">Hardcoded setup: OAuth client ID and sheet name are embedded. Configure a spreadsheet below once per browser.</p>
 
   <div id="setup">
     <div class="row"><strong>First-time setup</strong></div>
@@ -33,21 +43,24 @@
   
 
   <div id="controls" class="row" style="display:none">
-    <button id="btnSignIn">Sign in with Google</button>
-    <button id="btnRead">Read A1:C10</button>
-    <button id="btnAppend">Append row</button>
-    <span id="status" style="margin-left: 8px; font-weight: 600">Signed out</span>
+    <button id="btnCountRows">Count rows</button>
+    <span id="rowsLabel" class="muted" style="margin-left:8px"></span>
   </div>
 
   <pre id="out"></pre>
+  <div id="toasts" aria-live="polite" aria-atomic="true"></div>
 
   <div id="sessionUI" style="display:none">
-    <div class="row"><button id="btnNewSession">New Session</button> <span id="sessInfo" class="muted"></span></div>
+    <div class="row">
+      <button id="btnNewSession">New Session</button>
+      <button id="btnAbort" style="margin-left:8px">Abort Session</button>
+      <span id="sessInfo" class="muted" style="margin-left:8px"></span>
+    </div>
     <div class="row"><strong>Current:</strong> <span id="currentPutt"></span></div>
     <div class="row"><span class="muted">Next: <span id="nextPutts"></span></span> • <span id="progress">0/8</span></div>
     <div class="row">
-      <button id="btnSuccess">Success (1)</button>
-      <button id="btnFail">Fail (0)</button>
+      <button id="btnSuccess">Success</button>
+      <button id="btnFail">Fail</button>
     </div>
   </div>
 
@@ -62,7 +75,7 @@
       "L 6m","L 8m","L 10m","L step",
       "R 6m","R 8m","R 10m","R step"
     ];
-    const HEADERS = ["session","date","time", ...PUTTS];
+    const HEADERS = ["date","time", ...PUTTS];
 
     // Session state
     let session = null; // { number, date, time, order[], index, results: Map name->0/1 }
@@ -79,9 +92,23 @@
       document.getElementById("sessionUI").style.display = hasId ? "block" : "none";
     }
 
+    function showToast(message, kind) {
+      const cont = document.getElementById("toasts");
+      const el = document.createElement("div");
+      el.className = `toast ${kind === "fail" ? "toast-fail" : "toast-success"}`;
+      el.textContent = message;
+      cont.appendChild(el);
+      // Allow transition to apply
+      requestAnimationFrame(() => { el.classList.add("show"); });
+      setTimeout(() => {
+        el.classList.remove("show");
+        setTimeout(() => { el.remove(); }, 220);
+      }, 3000);
+    }
+
     async function ensureHeader(id) {
       // Check first row; if missing or different, write headers
-      const range = `${SHEET_NAME}!A1:K1`;
+      const range = `${SHEET_NAME}!A1:J1`;
       const res = await fetch(
         `https://sheets.googleapis.com/v4/spreadsheets/${id}/values/${encodeURIComponent(range)}`,
         { headers: { Authorization: `Bearer ${accessToken}` } }
@@ -91,6 +118,14 @@
       const row = (data.values && data.values[0]) || [];
       const equal = row.length === HEADERS.length && row.every((v,i)=>String(v)===String(HEADERS[i]));
       if (!equal) {
+        // Clear previous header row width (A1:K1) to avoid leftover cells after schema change
+        await fetch(
+          `https://sheets.googleapis.com/v4/spreadsheets/${id}/values/${encodeURIComponent(`${SHEET_NAME}!A1:K1`)}:clear`,
+          {
+            method: "POST",
+            headers: { Authorization: `Bearer ${accessToken}` },
+          }
+        );
         const put = await fetch(
           `https://sheets.googleapis.com/v4/spreadsheets/${id}/values/${encodeURIComponent(range)}?valueInputOption=RAW`,
           {
@@ -106,22 +141,7 @@
       }
     }
 
-    async function getNextSessionNumber(id) {
-      const range = `${SHEET_NAME}!A2:A`;
-      const res = await fetch(
-        `https://sheets.googleapis.com/v4/spreadsheets/${id}/values/${encodeURIComponent(range)}?majorDimension=COLUMNS`,
-        { headers: { Authorization: `Bearer ${accessToken}` } }
-      );
-      if (!res.ok) return 1;
-      const data = await res.json();
-      const col = (data.values && data.values[0]) || [];
-      let max = 0;
-      for (const v of col) {
-        const n = Number(v);
-        if (Number.isFinite(n)) max = Math.max(max, n);
-      }
-      return max + 1;
-    }
+    // removed: getNextSessionNumber — we no longer maintain a manual counter
 
     function shuffle(arr) {
       const a = arr.slice();
@@ -148,10 +168,8 @@
         await ensureSignedIn();
         const id = await ensureSpreadsheet();
         await ensureHeader(id);
-        const number = await getNextSessionNumber(id);
         const { date, time } = nowParts();
         session = {
-          number,
           date,
           time,
           order: shuffle(PUTTS),
@@ -166,23 +184,51 @@
     }
 
     function updateSessionUI() {
-      if (!session) return;
-      document.getElementById("sessInfo").textContent = `Session ${session.number} — ${session.date} ${session.time}`;
+      const sessInfo = document.getElementById("sessInfo");
+      const btnSuccess = document.getElementById("btnSuccess");
+      const btnFail = document.getElementById("btnFail");
+      if (!session) {
+        if (sessInfo) sessInfo.textContent = "No active session";
+        document.getElementById("currentPutt").textContent = "";
+        document.getElementById("nextPutts").textContent = "";
+        document.getElementById("progress").textContent = `0/${PUTTS.length}`;
+        btnSuccess.disabled = true;
+        btnFail.disabled = true;
+        return;
+      }
+      if (sessInfo) sessInfo.textContent = `Session — ${session.date} ${session.time}`;
       const curr = session.order[session.index];
-      document.getElementById("currentPutt").textContent = curr ? curr : "Done";
+      document.getElementById("currentPutt").innerHTML = curr ? formatPuttLabel(curr) : "Done";
       const next1 = session.order[session.index+1] || "";
-      const next2 = session.order[session.index+2] || "";
-      document.getElementById("nextPutts").textContent = [next1,next2].filter(Boolean).join(", ");
+      document.getElementById("nextPutts").innerHTML = next1 ? formatPuttLabel(next1) : "";
       document.getElementById("progress").textContent = `${Math.min(session.index, PUTTS.length)}/${PUTTS.length}`;
       const enable = session.index < PUTTS.length;
-      document.getElementById("btnSuccess").disabled = !enable;
-      document.getElementById("btnFail").disabled = !enable;
+      btnSuccess.disabled = !enable;
+      btnFail.disabled = !enable;
+    }
+
+    function abortSession() {
+      if (!session) {
+        showToast("No active session", "fail");
+        return;
+      }
+      session = null;
+      updateSessionUI();
+      showToast("Session aborted", "fail");
+    }
+
+    function formatPuttLabel(name) {
+      if (!name) return "";
+      const isLeft = name.startsWith("L ");
+      const cls = isLeft ? "lr-left" : "lr-right";
+      return `<span class="${cls}">${name}</span>`;
     }
 
     async function recordResult(val) {
       if (!session) return;
       const curr = session.order[session.index];
       if (curr) session.results[curr] = val;
+      showToast(val ? "Success" : "Fail", val ? "success" : "fail");
       session.index++;
       if (session.index >= PUTTS.length) {
         await finalizeSession();
@@ -192,10 +238,10 @@
 
     async function finalizeSession() {
       try {
-        const row = [session.number, session.date, session.time, ...PUTTS.map(p => session.results[p] ? 1 : 0)];
+        const row = [session.date, session.time, ...PUTTS.map(p => session.results[p] ? 1 : 0)];
         const id = spreadsheetId;
         const res = await fetch(
-          `https://sheets.googleapis.com/v4/spreadsheets/${id}/values/${encodeURIComponent(SHEET_NAME)}!A:K:append?valueInputOption=USER_ENTERED`,
+          `https://sheets.googleapis.com/v4/spreadsheets/${id}/values/${encodeURIComponent(SHEET_NAME)}!A:J:append?valueInputOption=USER_ENTERED`,
           {
             method: "POST",
             headers: {
@@ -207,8 +253,10 @@
         );
         if (!res.ok) throw new Error(`Failed to append session: ${await res.text()}`);
         setMsg("Session saved.");
+        showToast("Session saved", "success");
       } catch (e) {
         setMsg(String(e));
+        showToast("Save failed", "fail");
       }
     }
 
@@ -218,7 +266,8 @@
         scope: scopes,
         callback: (resp) => {
           accessToken = resp.access_token;
-          document.getElementById("status").textContent = "Signed in";
+          const st = document.getElementById("status");
+          if (st) st.textContent = "Signed in";
         },
       });
     }
@@ -238,7 +287,8 @@
         const prevCb = tokenClient.callback;
         tokenClient.callback = (resp) => {
           accessToken = resp.access_token;
-          document.getElementById("status").textContent = "Signed in";
+          const st = document.getElementById("status");
+          if (st) st.textContent = "Signed in";
           tokenClient.callback = prevCb; // restore
           resolve();
         };
@@ -339,10 +389,29 @@
       alert("Row appended!");
     }
 
-    document.getElementById("btnSignIn").addEventListener("click", signIn);
-    document.getElementById("btnRead").addEventListener("click", readSheet);
-    document.getElementById("btnAppend").addEventListener("click", appendRow);
+    async function countRows() {
+      try {
+        await ensureSignedIn();
+        const id = await ensureSpreadsheet();
+        const range = `${SHEET_NAME}!A:A`;
+        const res = await fetch(
+          `https://sheets.googleapis.com/v4/spreadsheets/${id}/values/${encodeURIComponent(range)}?majorDimension=ROWS`,
+          { headers: { Authorization: `Bearer ${accessToken}` } }
+        );
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+        const rows = (data.values || []).length;
+        const lbl = document.getElementById("rowsLabel");
+        if (lbl) lbl.textContent = `Rows: ${rows}`;
+      } catch (e) {
+        const lbl = document.getElementById("rowsLabel");
+        if (lbl) lbl.textContent = `Count failed`;
+      }
+    }
+
+    document.getElementById("btnCountRows").addEventListener("click", countRows);
     document.getElementById("btnNewSession").addEventListener("click", startSession);
+    document.getElementById("btnAbort").addEventListener("click", abortSession);
     document.getElementById("btnSuccess").addEventListener("click", () => recordResult(1));
     document.getElementById("btnFail").addEventListener("click", () => recordResult(0));
 
