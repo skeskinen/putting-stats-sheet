@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sheets-as-DB Demo</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, sans-serif; margin: 24px; }
+    .row { margin-top: 8px; }
+    input, button { font-size: 16px; padding: 8px; }
+    pre { background: #f6f6f6; padding: 12px; border-radius: 8px; overflow: auto; }
+    .muted { color: #666; }
+  </style>
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+</head>
+<body>
+  <h1>Sheets-as-DB Demo</h1>
+  <p class="muted">Deploy this folder to GitHub Pages, set your Google OAuth <code>CLIENT_ID</code> below, and paste a Spreadsheet ID you can access.</p>
+
+  <div class="row">
+    <label>OAuth CLIENT_ID: <input id="clientId" placeholder="YOUR_OAUTH_CLIENT_ID.apps.googleusercontent.com" size="60"></label>
+  </div>
+  <div class="row">
+    <label>Spreadsheet ID: <input id="sheetId" placeholder="e.g. 1AbC...xyz" size="60"></label>
+  </div>
+
+  <div class="row">
+    <button id="btnSignIn">Sign in with Google</button>
+    <button id="btnRead">Read A1:C10</button>
+    <button id="btnAppend">Append row</button>
+    <span id="status" style="margin-left: 8px; font-weight: 600">Signed out</span>
+  </div>
+
+  <pre id="out"></pre>
+
+  <script>
+    let tokenClient, accessToken, scopes = "https://www.googleapis.com/auth/spreadsheets";
+
+    function initAuth() {
+      tokenClient = google.accounts.oauth2.initTokenClient({
+        client_id: document.getElementById("clientId").value || "YOUR_OAUTH_CLIENT_ID.apps.googleusercontent.com",
+        scope: scopes,
+        callback: (resp) => {
+          accessToken = resp.access_token;
+          document.getElementById("status").textContent = "Signed in";
+        },
+      });
+    }
+
+    function signIn() {
+      const cid = document.getElementById("clientId").value.trim();
+      if (!cid || !cid.endsWith(".apps.googleusercontent.com")) {
+        return alert("Please enter a valid OAuth CLIENT_ID.");
+      }
+      if (!tokenClient) initAuth();
+      tokenClient.clientId = cid;
+      tokenClient.requestAccessToken();
+    }
+
+    async function readSheet() {
+      if (!accessToken) return alert("Sign in first");
+      const spreadsheetId = document.getElementById("sheetId").value.trim();
+      if (!spreadsheetId) return alert("Enter a Spreadsheet ID");
+      const range = "Sheet1!A1:C10";
+      const res = await fetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(range)}?majorDimension=ROWS`,
+        { headers: { Authorization: `Bearer ${accessToken}` } }
+      );
+      const data = await res.json();
+      document.getElementById("out").textContent = JSON.stringify(data.values || [], null, 2);
+    }
+
+    async function appendRow() {
+      if (!accessToken) return alert("Sign in first");
+      const spreadsheetId = document.getElementById("sheetId").value.trim();
+      if (!spreadsheetId) return alert("Enter a Spreadsheet ID");
+      const body = {
+        values: [[new Date().toISOString(), "event", Math.floor(Math.random()*100)]],
+      };
+      const res = await fetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Sheet1!A:C:append?valueInputOption=USER_ENTERED`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(body),
+        }
+      );
+      const data = await res.json();
+      alert("Row appended!");
+    }
+
+    document.getElementById("btnSignIn").addEventListener("click", signIn);
+    document.getElementById("btnRead").addEventListener("click", readSheet);
+    document.getElementById("btnAppend").addEventListener("click", appendRow);
+  </script>
+</body>
+</html>
