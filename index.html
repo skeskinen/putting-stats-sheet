@@ -41,6 +41,16 @@
 
   <pre id="out"></pre>
 
+  <div id="sessionUI" style="display:none">
+    <div class="row"><button id="btnNewSession">New Session</button> <span id="sessInfo" class="muted"></span></div>
+    <div class="row"><strong>Current:</strong> <span id="currentPutt"></span></div>
+    <div class="row"><span class="muted">Next: <span id="nextPutts"></span></span> • <span id="progress">0/8</span></div>
+    <div class="row">
+      <button id="btnSuccess">Success (1)</button>
+      <button id="btnFail">Fail (0)</button>
+    </div>
+  </div>
+
   <script>
     let tokenClient, accessToken, scopes = "https://www.googleapis.com/auth/spreadsheets";
     const CLIENT_ID = "775302818197-p5jn3hq79uv93b66n5109b264sdgdctc.apps.googleusercontent.com"; // provided by user
@@ -48,6 +58,14 @@
     const SPREADSHEET_ID = ""; // optional: hardcode an existing spreadsheetId to skip setup
     const STORAGE_KEY = "putting_stats_spreadsheet_id";
     let spreadsheetId = null;
+    const PUTTS = [
+      "L 6m","L 8m","L 10m","L step",
+      "R 6m","R 8m","R 10m","R step"
+    ];
+    const HEADERS = ["session","date","time", ...PUTTS];
+
+    // Session state
+    let session = null; // { number, date, time, order[], index, results: Map name->0/1 }
 
     function setMsg(text) {
       const el = document.getElementById("msg");
@@ -58,6 +76,140 @@
       const hasId = !!spreadsheetId;
       document.getElementById("setup").style.display = hasId ? "none" : "block";
       document.getElementById("controls").style.display = hasId ? "block" : "none";
+      document.getElementById("sessionUI").style.display = hasId ? "block" : "none";
+    }
+
+    async function ensureHeader(id) {
+      // Check first row; if missing or different, write headers
+      const range = `${SHEET_NAME}!A1:K1`;
+      const res = await fetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${id}/values/${encodeURIComponent(range)}`,
+        { headers: { Authorization: `Bearer ${accessToken}` } }
+      );
+      if (!res.ok) throw new Error(`Failed to read headers: ${await res.text()}`);
+      const data = await res.json();
+      const row = (data.values && data.values[0]) || [];
+      const equal = row.length === HEADERS.length && row.every((v,i)=>String(v)===String(HEADERS[i]));
+      if (!equal) {
+        const put = await fetch(
+          `https://sheets.googleapis.com/v4/spreadsheets/${id}/values/${encodeURIComponent(range)}?valueInputOption=RAW`,
+          {
+            method: "PUT",
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ values: [HEADERS] }),
+          }
+        );
+        if (!put.ok) throw new Error(`Failed to set headers: ${await put.text()}`);
+      }
+    }
+
+    async function getNextSessionNumber(id) {
+      const range = `${SHEET_NAME}!A2:A`;
+      const res = await fetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${id}/values/${encodeURIComponent(range)}?majorDimension=COLUMNS`,
+        { headers: { Authorization: `Bearer ${accessToken}` } }
+      );
+      if (!res.ok) return 1;
+      const data = await res.json();
+      const col = (data.values && data.values[0]) || [];
+      let max = 0;
+      for (const v of col) {
+        const n = Number(v);
+        if (Number.isFinite(n)) max = Math.max(max, n);
+      }
+      return max + 1;
+    }
+
+    function shuffle(arr) {
+      const a = arr.slice();
+      for (let i=a.length-1;i>0;i--) {
+        const j = Math.floor(Math.random()*(i+1));
+        [a[i],a[j]] = [a[j],a[i]];
+      }
+      return a;
+    }
+
+    function nowParts() {
+      const d = new Date();
+      const yyyy = d.getFullYear();
+      const mm = String(d.getMonth()+1).padStart(2,'0');
+      const dd = String(d.getDate()).padStart(2,'0');
+      const hh = String(d.getHours()).padStart(2,'0');
+      const mi = String(d.getMinutes()).padStart(2,'0');
+      return { date: `${yyyy}-${mm}-${dd}`, time: `${hh}:${mi}` };
+    }
+
+    async function startSession() {
+      try {
+        setMsg("");
+        await ensureSignedIn();
+        const id = await ensureSpreadsheet();
+        await ensureHeader(id);
+        const number = await getNextSessionNumber(id);
+        const { date, time } = nowParts();
+        session = {
+          number,
+          date,
+          time,
+          order: shuffle(PUTTS),
+          index: 0,
+          results: {}
+        };
+        updateSessionUI();
+        document.getElementById("sessionUI").style.display = "block";
+      } catch (e) {
+        setMsg(String(e));
+      }
+    }
+
+    function updateSessionUI() {
+      if (!session) return;
+      document.getElementById("sessInfo").textContent = `Session ${session.number} — ${session.date} ${session.time}`;
+      const curr = session.order[session.index];
+      document.getElementById("currentPutt").textContent = curr ? curr : "Done";
+      const next1 = session.order[session.index+1] || "";
+      const next2 = session.order[session.index+2] || "";
+      document.getElementById("nextPutts").textContent = [next1,next2].filter(Boolean).join(", ");
+      document.getElementById("progress").textContent = `${Math.min(session.index, PUTTS.length)}/${PUTTS.length}`;
+      const enable = session.index < PUTTS.length;
+      document.getElementById("btnSuccess").disabled = !enable;
+      document.getElementById("btnFail").disabled = !enable;
+    }
+
+    async function recordResult(val) {
+      if (!session) return;
+      const curr = session.order[session.index];
+      if (curr) session.results[curr] = val;
+      session.index++;
+      if (session.index >= PUTTS.length) {
+        await finalizeSession();
+      }
+      updateSessionUI();
+    }
+
+    async function finalizeSession() {
+      try {
+        const row = [session.number, session.date, session.time, ...PUTTS.map(p => session.results[p] ? 1 : 0)];
+        const id = spreadsheetId;
+        const res = await fetch(
+          `https://sheets.googleapis.com/v4/spreadsheets/${id}/values/${encodeURIComponent(SHEET_NAME)}!A:K:append?valueInputOption=USER_ENTERED`,
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ values: [row] }),
+          }
+        );
+        if (!res.ok) throw new Error(`Failed to append session: ${await res.text()}`);
+        setMsg("Session saved.");
+      } catch (e) {
+        setMsg(String(e));
+      }
     }
 
     function initAuth() {
@@ -190,6 +342,9 @@
     document.getElementById("btnSignIn").addEventListener("click", signIn);
     document.getElementById("btnRead").addEventListener("click", readSheet);
     document.getElementById("btnAppend").addEventListener("click", appendRow);
+    document.getElementById("btnNewSession").addEventListener("click", startSession);
+    document.getElementById("btnSuccess").addEventListener("click", () => recordResult(1));
+    document.getElementById("btnFail").addEventListener("click", () => recordResult(0));
 
     async function handleCreateSheet() {
       try {
