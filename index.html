@@ -70,6 +70,7 @@
     const SHEET_NAME = "putting-stats"; // hardcoded sheet/tab name
     const SPREADSHEET_ID = ""; // optional: hardcode an existing spreadsheetId to skip setup
     const STORAGE_KEY = "putting_stats_spreadsheet_id";
+    const READY_KEY = "putting_stats_ready"; // set to the sheetId when header/tab verified
     let spreadsheetId = null;
     const PUTTS = [
       "L 6m","L 8m","L 10m","L step",
@@ -165,9 +166,10 @@
     async function startSession() {
       try {
         setMsg("");
-        await ensureSignedIn();
-        const id = await ensureSpreadsheet();
-        await ensureHeader(id);
+        if (!spreadsheetId) {
+          setMsg("Spreadsheet not configured. Create one or paste an ID.");
+          return;
+        }
         const { date, time } = nowParts();
         session = {
           date,
@@ -238,6 +240,9 @@
 
     async function finalizeSession() {
       try {
+        // Ensure we have a token before the only network call in a session
+        await ensureSignedIn();
+        if (!spreadsheetId) throw new Error("Spreadsheet not configured");
         const row = [session.date, session.time, ...PUTTS.map(p => session.results[p] ? 1 : 0)];
         const id = spreadsheetId;
         const res = await fetch(
@@ -421,7 +426,10 @@
         await ensureSignedIn();
         const created = await createSpreadsheet();
         spreadsheetId = created.spreadsheetId;
+        // Ensure header present now so sessions can start instantly later
+        await ensureHeader(spreadsheetId);
         localStorage.setItem(STORAGE_KEY, spreadsheetId);
+        localStorage.setItem(READY_KEY, spreadsheetId);
         setMsg(`Created: https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`);
         updateUI();
       } catch (e) {
@@ -447,7 +455,10 @@
         if (!titles.includes(SHEET_NAME)) {
           await addSheet(spreadsheetId, SHEET_NAME);
         }
+        // Ensure header present now so sessions can start instantly later
+        await ensureHeader(spreadsheetId);
         localStorage.setItem(STORAGE_KEY, spreadsheetId);
+        localStorage.setItem(READY_KEY, spreadsheetId);
         setMsg(`Configured: https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`);
         updateUI();
       } catch (e) {
