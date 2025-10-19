@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Sheets-as-DB Demo</title>
+  <title>Putting Stats</title>
   <style>
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, sans-serif; margin: 24px; }
     .row { margin-top: 8px; }
@@ -14,17 +14,25 @@
   <script src="https://accounts.google.com/gsi/client" async defer></script>
 </head>
 <body>
-  <h1>Sheets-as-DB Demo</h1>
-  <p class="muted">Deploy this folder to GitHub Pages, set your Google OAuth <code>CLIENT_ID</code> below, and paste a Spreadsheet ID you can access.</p>
+  <h1>Disc Golf Putting Stats</h1>
+  <p class="muted">Hardcoded setup: OAuth client ID and sheet name are embedded. Configure a spreadsheet below once per browser.</p>
 
-  <div class="row">
-    <label>OAuth CLIENT_ID: <input id="clientId" placeholder="YOUR_OAUTH_CLIENT_ID.apps.googleusercontent.com" size="60"></label>
-  </div>
-  <div class="row">
-    <label>Spreadsheet ID: <input id="sheetId" placeholder="e.g. 1AbC...xyz" size="60"></label>
+  <div id="setup">
+    <div class="row"><strong>First-time setup</strong></div>
+    <div class="row">
+      <button id="btnCreateSheet">Create New Spreadsheet</button>
+      <span class="muted">Creates a sheet with tab <code>putting-stats</code>.</span>
+    </div>
+    <div class="row">
+      <input id="inputSheetId" placeholder="Paste existing Spreadsheet ID" size="40" />
+      <button id="btnUseSheetId">Use ID</button>
+    </div>
+    <div id="msg" class="row muted"></div>
   </div>
 
-  <div class="row">
+  
+
+  <div id="controls" class="row" style="display:none">
     <button id="btnSignIn">Sign in with Google</button>
     <button id="btnRead">Read A1:C10</button>
     <button id="btnAppend">Append row</button>
@@ -35,10 +43,26 @@
 
   <script>
     let tokenClient, accessToken, scopes = "https://www.googleapis.com/auth/spreadsheets";
+    const CLIENT_ID = "775302818197-p5jn3hq79uv93b66n5109b264sdgdctc.apps.googleusercontent.com"; // provided by user
+    const SHEET_NAME = "putting-stats"; // hardcoded sheet/tab name
+    const SPREADSHEET_ID = ""; // optional: hardcode an existing spreadsheetId to skip setup
+    const STORAGE_KEY = "putting_stats_spreadsheet_id";
+    let spreadsheetId = null;
+
+    function setMsg(text) {
+      const el = document.getElementById("msg");
+      if (el) el.textContent = text || "";
+    }
+
+    function updateUI() {
+      const hasId = !!spreadsheetId;
+      document.getElementById("setup").style.display = hasId ? "none" : "block";
+      document.getElementById("controls").style.display = hasId ? "block" : "none";
+    }
 
     function initAuth() {
       tokenClient = google.accounts.oauth2.initTokenClient({
-        client_id: document.getElementById("clientId").value || "YOUR_OAUTH_CLIENT_ID.apps.googleusercontent.com",
+        client_id: CLIENT_ID,
         scope: scopes,
         callback: (resp) => {
           accessToken = resp.access_token;
@@ -48,22 +72,94 @@
     }
 
     function signIn() {
-      const cid = document.getElementById("clientId").value.trim();
-      if (!cid || !cid.endsWith(".apps.googleusercontent.com")) {
-        return alert("Please enter a valid OAuth CLIENT_ID.");
-      }
       if (!tokenClient) initAuth();
-      tokenClient.clientId = cid;
+      tokenClient.clientId = CLIENT_ID;
       tokenClient.requestAccessToken();
     }
 
+    // Ensure we have an access token; if not, trigger sign-in popup from this user gesture
+    function ensureSignedIn() {
+      return new Promise((resolve) => {
+        if (accessToken) return resolve();
+        if (!tokenClient) initAuth();
+        tokenClient.clientId = CLIENT_ID;
+        const prevCb = tokenClient.callback;
+        tokenClient.callback = (resp) => {
+          accessToken = resp.access_token;
+          document.getElementById("status").textContent = "Signed in";
+          tokenClient.callback = prevCb; // restore
+          resolve();
+        };
+        tokenClient.requestAccessToken();
+      });
+    }
+
+    async function ensureSpreadsheet() {
+      if (!spreadsheetId) {
+        spreadsheetId = SPREADSHEET_ID || localStorage.getItem(STORAGE_KEY) || null;
+      }
+      if (!spreadsheetId) throw new Error("Spreadsheet not configured. Create one or paste an ID.");
+      const meta = await fetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?fields=sheets.properties.title`,
+        { headers: { Authorization: `Bearer ${accessToken}` } }
+      );
+      if (!meta.ok) {
+        const err = await meta.text();
+        throw new Error(`Failed to fetch spreadsheet metadata: ${err}`);
+      }
+      const metaJson = await meta.json();
+      const titles = (metaJson.sheets || []).map(s => s.properties && s.properties.title);
+      if (!titles.includes(SHEET_NAME)) {
+        await addSheet(spreadsheetId, SHEET_NAME);
+      }
+      return spreadsheetId;
+    }
+
+    async function createSpreadsheet() {
+      const body = {
+        properties: { title: "Disc Golf Putting Stats" },
+        sheets: [{ properties: { title: SHEET_NAME } }],
+      };
+      const res = await fetch("https://sheets.googleapis.com/v4/spreadsheets", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const err = await res.text();
+        throw new Error(`Failed to create spreadsheet: ${err}`);
+      }
+      return await res.json();
+    }
+
+    async function addSheet(spreadsheetId, title) {
+      const body = {
+        requests: [ { addSheet: { properties: { title } } } ]
+      };
+      const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const err = await res.text();
+        throw new Error(`Failed to add sheet: ${err}`);
+      }
+      return await res.json();
+    }
+
     async function readSheet() {
-      if (!accessToken) return alert("Sign in first");
-      const spreadsheetId = document.getElementById("sheetId").value.trim();
-      if (!spreadsheetId) return alert("Enter a Spreadsheet ID");
-      const range = "Sheet1!A1:C10";
+      if (!accessToken) await ensureSignedIn();
+      const id = await ensureSpreadsheet();
+      const range = `${SHEET_NAME}!A1:C10`;
       const res = await fetch(
-        `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(range)}?majorDimension=ROWS`,
+        `https://sheets.googleapis.com/v4/spreadsheets/${id}/values/${encodeURIComponent(range)}?majorDimension=ROWS`,
         { headers: { Authorization: `Bearer ${accessToken}` } }
       );
       const data = await res.json();
@@ -71,14 +167,13 @@
     }
 
     async function appendRow() {
-      if (!accessToken) return alert("Sign in first");
-      const spreadsheetId = document.getElementById("sheetId").value.trim();
-      if (!spreadsheetId) return alert("Enter a Spreadsheet ID");
+      if (!accessToken) await ensureSignedIn();
+      const id = await ensureSpreadsheet();
       const body = {
         values: [[new Date().toISOString(), "event", Math.floor(Math.random()*100)]],
       };
       const res = await fetch(
-        `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Sheet1!A:C:append?valueInputOption=USER_ENTERED`,
+        `https://sheets.googleapis.com/v4/spreadsheets/${id}/values/${encodeURIComponent(SHEET_NAME)}!A:C:append?valueInputOption=USER_ENTERED`,
         {
           method: "POST",
           headers: {
@@ -95,6 +190,53 @@
     document.getElementById("btnSignIn").addEventListener("click", signIn);
     document.getElementById("btnRead").addEventListener("click", readSheet);
     document.getElementById("btnAppend").addEventListener("click", appendRow);
+
+    async function handleCreateSheet() {
+      try {
+        setMsg("Creating spreadsheet…");
+        await ensureSignedIn();
+        const created = await createSpreadsheet();
+        spreadsheetId = created.spreadsheetId;
+        localStorage.setItem(STORAGE_KEY, spreadsheetId);
+        setMsg(`Created: https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`);
+        updateUI();
+      } catch (e) {
+        setMsg(String(e));
+      }
+    }
+
+    async function handleUseSheetId() {
+      try {
+        const val = document.getElementById("inputSheetId").value.trim();
+        if (!val) { setMsg("Please paste a Spreadsheet ID."); return; }
+        setMsg("Validating spreadsheet…");
+        await ensureSignedIn();
+        const meta = await fetch(
+          `https://sheets.googleapis.com/v4/spreadsheets/${val}?fields=spreadsheetId,sheets.properties.title`,
+          { headers: { Authorization: `Bearer ${accessToken}` } }
+        );
+        if (!meta.ok) { setMsg("Cannot access that spreadsheet. Check ID and sharing."); return; }
+        const metaJson = await meta.json();
+        spreadsheetId = metaJson.spreadsheetId;
+        // Ensure tab exists
+        const titles = (metaJson.sheets || []).map(s => s.properties && s.properties.title);
+        if (!titles.includes(SHEET_NAME)) {
+          await addSheet(spreadsheetId, SHEET_NAME);
+        }
+        localStorage.setItem(STORAGE_KEY, spreadsheetId);
+        setMsg(`Configured: https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`);
+        updateUI();
+      } catch (e) {
+        setMsg(String(e));
+      }
+    }
+
+    document.getElementById("btnCreateSheet").addEventListener("click", handleCreateSheet);
+    document.getElementById("btnUseSheetId").addEventListener("click", handleUseSheetId);
+
+    // Initialize UI state from storage/constant
+    spreadsheetId = SPREADSHEET_ID || localStorage.getItem(STORAGE_KEY) || null;
+    updateUI();
   </script>
 </body>
 </html>
